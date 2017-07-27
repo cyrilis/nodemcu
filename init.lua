@@ -1,6 +1,6 @@
 wifi.setmode(wifi.STATIONAP)
 station_cfg={}
-station_cfg.ssid="Dont Panic"
+station_cfg.ssid="Hurricane"
 station_cfg.pwd="fullstackoverflow"
 station_cfg.save=false
 wifi.sta.config(station_cfg)
@@ -14,42 +14,90 @@ ap_cfg.auth = wifi.WPA_WPA2_PSK
 ap_cfg.channel = 9
 wifi.ap.config(ap_cfg)
 
-function startServer()
-	sv = net.createServer(net.TCP, 30)
-	function receiver(sck, data)
-	  print("receive:", data)
-	  sck:close()
-	end
+stopPlantTowerTimer = false
+sendDataTimer = tmr.create()
 
-	if sv then
-	  sv:listen(80, function(conn)
-	    conn:on("receive", receiver)
-	    conn:send([[
-	    	<html>
-	    		<body>
-	    			<form action="/" method="POST">
-	    				<input type="text" placeholder="ssid" name="ssid" />
-	    				<input type="password" placeholder="password" name="password"/>
-	    			</form>
-	    		</body>
-			</html>
-	    ]])
-	    conn:close()
-	  end)
-	end
+function startServer()
+	function Sendfile(client, filename)
+        if file.open(filename, "r") then
+            local function sendChunk()
+                local line = file.read(512)
+                if line then
+                    client:send(line, sendChunk)
+                else
+                    client:send("<br>" .. (wifi.sta.getip() or "NO IP"))
+                    file.close()
+                    client:close()
+                    collectgarbage()
+                end
+            end
+            client:send("HTTP/1.1 200 OK\r\n" ..
+                "Server: NodeMCU on ESP8266\r\n" ..
+                "Content-Type: text/html; charset=UTF-8\r\n\r\n", sendChunk)
+        else
+            client:send("HTTP/1.0 404 Not Found\r\n\r\nPage not found")
+            client:close()
+        end
+    end
+
+    function Send(client, str)
+    	client:send("HTTP/1.0 404 Not Found\r\n\r\n" .. (str or "NO DATA"))
+    	client:close()
+    end
+
+    srv = net.createServer(net.TCP)
+    srv:listen(80, function(conn)
+        conn:on ("receive", function(client, request)
+            local path = string.match(request, "GET /(.-) HTTP")
+            if path == "" then
+                Sendfile(client, "index.html")
+            elseif path == "startTimer" then
+            		sendDataTimer:start()
+            		Send(client, "Timer Start!")
+            elseif path == "stopTimer" then
+            		sendDataTimer:stop()
+            		Send(client, "Timer Stop!")
+            elseif path == "stopServer" then
+            		Send(client, "Server Stop!")
+            		srv:close()
+            else
+                local path = string.match(request, "GET /ssid(.-) HTTP")
+                local ssid = string.match(request, "GET /ssid.-ssid=(.-)&")
+                local password = string.match(request, "GET /ssid.-%&password=(.-) HTTP")
+                print("SSID, PASSWORD:", ssid, password, path)
+                if ssid and password then
+                    changeSSID(ssid, password)
+                    -- collectgarbage()
+                end
+                client:send("HTTP/1.0 200 OK\r\n\r\n" .. (wifi.sta.getip() or "NOT CONNECTED..."))
+                client:close()
+            end
+        end)
+    end)
 end
 
 startServer();
 
-function stopServer()
-end
+
 
 function changeSSID(ssid, password)
+    print(ssid, password)
 	station_cfg.ssid = ssid
 	station_cfg.pwd = password
 	wifi.sta.disconnect()
 	wifi.sta.config(station_cfg)
 	wifi.sta.connect()
+
+    do
+      local x=wifi.sta.getapinfo()
+      local y=wifi.sta.getapindex()
+      print("\n Number of APs stored in flash:", x.qty)
+      print(string.format("  %-6s %-32s %-64s %-18s", "index:", "SSID:", "Password:", "BSSID:"))
+      for i=1, (x.qty), 1 do
+        print(string.format(" %s%-6d %-32s %-64s %-18s",(i==y and ">" or " "), i, x[i].ssid, x[i].pwd and x[i].pwd or type(nil), x[i].bssid and x[i].bssid or type(nil)))
+      end
+    end
+
 end
 
 -- print AP list in old format (format not defined)
@@ -130,18 +178,7 @@ PMset=7
 require('plantower').init(PMset)
 plantower.verbose=true -- verbose mode
 plantower.psd=true
-plantower.read(function(data)
-	if data then
-		print("---- CN - TSI ----")
-		for k, v in pairs(parseData(data, "CN", "TSI")) do
-			print(k,":",v)
-		end
-		print("---- US - ATM ----")
-		for k, v in pairs(parseData(data, "CN", "TSI")) do
-			print(k,":",v)
-		end
-	end
-end)
+
 
 function getTemperature()
 	local pin = 5
@@ -152,14 +189,16 @@ function getTemperature()
 	return temp, humi
 end
 
-
-local sendDataTimer = tmr.create()
-local weatherURL = "https://wechat.again.cc/weather"
+weatherURL = "https://wechat.again.cc/weather"
 
 sendDataTimer:register(15000, tmr.ALARM_AUTO, function ()
 	local headers = "Content-Type: application/json\r\n"
 	local json = ""
 	plantower.read(function (data)
+		if stopPlantTowerTimer then
+			sendDataTimer:stop()
+			return
+		end
 		if data then
 			print("---- CN - TSI ----")
 			local pmData = parseData(data, "CN", "TSI")
@@ -181,4 +220,17 @@ sendDataTimer:register(15000, tmr.ALARM_AUTO, function ()
 		end
 	end)
 end)
--- sendDataTimer:start()
+
+plantower.read(function(data)
+	if data then
+		print("---- CN - TSI ----")
+		for k, v in pairs(parseData(data, "CN", "TSI")) do
+			print(k,":",v)
+		end
+		print("---- US - ATM ----")
+		for k, v in pairs(parseData(data, "CN", "TSI")) do
+			print(k,":",v)
+		end
+		sendDataTimer:start()
+	end
+end)
